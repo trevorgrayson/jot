@@ -2,6 +2,7 @@
 
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -14,7 +15,7 @@
 // -----------------------------------------------------------------------------
 
 #ifndef JOT_API_URL
-#define JOT_API_URL "https://txtin.gs/api/v1/messages"
+#define JOT_API_URL "http://txtin.gs/api/v1/messages"
 #endif
 
 #ifndef JOT_API_TOKEN
@@ -30,9 +31,7 @@ struct FriendlyNetwork {
 };
 
 FriendlyNetwork networks[] = {
-    {"home-wifi",     "password"},
-    {"office-wifi",   "password"},
-    {"phone-hotspot", "password"},
+// {"office-wifi",   "password"},
 };
 
 constexpr size_t NETWORK_COUNT =
@@ -650,13 +649,22 @@ bool postMessages(
         WiFi.SSID().c_str()
     );
 
-    WiFiClientSecure client;
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
 
     // Development only.
     //
     // Replace with CA verification
     // for production.
-    client.setInsecure();
+    secureClient.setInsecure();
+
+    bool useTls =
+        String(API_URL).startsWith("https://");
+
+    WiFiClient& client =
+        useTls
+            ? static_cast<WiFiClient&>(secureClient)
+            : plainClient;
 
     HTTPClient http;
 
@@ -693,8 +701,7 @@ bool postMessages(
 
     int status =
         http.POST(
-            (uint8_t*)payload.c_str(),
-            payload.length()
+            payload
         );
 
     Serial.printf(
