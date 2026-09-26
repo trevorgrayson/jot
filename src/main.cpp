@@ -1,4 +1,11 @@
+#if defined(USE_CARDKB2_UNIT)
+#include <M5Unified.h>
+#include <M5UnitUnified.h>
+#include <M5UnitUnifiedKEYBOARD.h>
+#include <Wire.h>
+#else
 #include "M5Cardputer.h"
+#endif
 
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -7,8 +14,52 @@
 #include <LittleFS.h>
 #include <Preferences.h>
 
+#include <cctype>
 #include <cstring>
 #include <vector>
+
+#if defined(USE_CARDKB2_UNIT)
+namespace {
+m5::unit::UnitUnified units;
+m5::unit::UnitCardKB2 cardkb2;
+
+bool cardkb2Ready = false;
+
+bool setupCardKB2() {
+    auto pinSda =
+        M5.getPin(m5::pin_name_t::port_a_sda);
+    auto pinScl =
+        M5.getPin(m5::pin_name_t::port_a_scl);
+
+    if (pinSda < 0 || pinScl < 0) {
+        Serial.println(
+            "CardKB2 I2C pins unavailable"
+        );
+
+        return false;
+    }
+
+    Wire.end();
+    Wire.begin(pinSda, pinScl, 100000U);
+
+    if (!units.add(cardkb2, Wire) ||
+        !units.begin()) {
+        Serial.println(
+            "CardKB2 not found; set it to I2C mode with Fn+Sym+1"
+        );
+
+        return false;
+    }
+
+    Serial.printf(
+        "CardKB2 firmware: %02x\n",
+        cardkb2.firmwareVersion()
+    );
+
+    return true;
+}
+}  // namespace
+#endif
 
 // -----------------------------------------------------------------------------
 // Configuration
@@ -84,6 +135,12 @@ struct NetworkStatus {
 NetworkStatus networkStatus;
 
 volatile bool uiDirty = true;
+
+#if defined(USE_CARDKB2_UNIT)
+#define APP_DISPLAY M5.Display
+#else
+#define APP_DISPLAY M5Cardputer.Display
+#endif
 
 // -----------------------------------------------------------------------------
 // Device identity
@@ -339,7 +396,7 @@ void drawUI() {
     xSemaphoreGive(queueMutex);
 
     auto& display =
-        M5Cardputer.Display;
+        APP_DISPLAY;
 
     display.fillScreen(BLACK);
 
@@ -480,6 +537,43 @@ void submitMessage() {
 // -----------------------------------------------------------------------------
 
 void handleKeyboard() {
+#if defined(USE_CARDKB2_UNIT)
+    if (!cardkb2Ready)
+        return;
+
+    if (!cardkb2.updated())
+        return;
+
+    while (cardkb2.available()) {
+        char c = cardkb2.getchar();
+        cardkb2.discard();
+
+        if (c == '\r' || c == '\n') {
+            submitMessage();
+            continue;
+        }
+
+        if (
+            (c == '\b' || c == 0x7f) &&
+            input.length() > 0
+        ) {
+            input.remove(
+                input.length() - 1
+            );
+
+            uiDirty = true;
+            continue;
+        }
+
+        if (
+            isprint((unsigned char)c) &&
+            input.length() < MAX_MESSAGE_LENGTH
+        ) {
+            input += c;
+            uiDirty = true;
+        }
+    }
+#else
     if (!M5Cardputer.Keyboard.isChange())
         return;
 
@@ -510,6 +604,7 @@ void handleKeyboard() {
     }
 
     uiDirty = true;
+#endif
 }
 
 // -----------------------------------------------------------------------------
@@ -831,6 +926,16 @@ void networkTask(void* parameter) {
 void setup() {
     Serial.begin(115200);
 
+#if defined(USE_CARDKB2_UNIT)
+    auto cfg = M5.config();
+
+    M5.begin(cfg);
+
+    M5.Display.setRotation(1);
+
+    cardkb2Ready =
+        setupCardKB2();
+#else
     auto cfg = M5.config();
 
     M5Cardputer.begin(
@@ -839,6 +944,7 @@ void setup() {
     );
 
     M5Cardputer.Display.setRotation(1);
+#endif
 
     LittleFS.begin(true);
 
@@ -906,7 +1012,12 @@ void loop() {
     // This path stays very fast regardless of
     // WiFi or server behavior.
 
+#if defined(USE_CARDKB2_UNIT)
+    M5.update();
+    units.update();
+#else
     M5Cardputer.update();
+#endif
 
     handleKeyboard();
 
