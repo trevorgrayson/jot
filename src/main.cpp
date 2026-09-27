@@ -1,29 +1,94 @@
+#if defined(USE_CARDKB2_UNIT)
+#include <M5Unified.h>
+#include <M5UnitUnified.h>
+#include <M5UnitUnifiedKEYBOARD.h>
+#include <Wire.h>
+#else
 #include "M5Cardputer.h"
+#endif
 
 #include <WiFi.h>
-#include <HTTPClient.h>
 #include <WiFiClient.h>
-#include <WiFiClientSecure.h>
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <PubSubClient.h>
 
+#include <cctype>
 #include <cstring>
 #include <vector>
+
+#if defined(USE_CARDKB2_UNIT)
+namespace {
+m5::unit::UnitUnified units;
+m5::unit::UnitCardKB2 cardkb2;
+
+bool cardkb2Ready = false;
+
+bool setupCardKB2() {
+    auto pinSda =
+        M5.getPin(m5::pin_name_t::port_a_sda);
+    auto pinScl =
+        M5.getPin(m5::pin_name_t::port_a_scl);
+
+    if (pinSda < 0 || pinScl < 0) {
+        Serial.println(
+            "CardKB2 I2C pins unavailable"
+        );
+
+        return false;
+    }
+
+    Wire.end();
+    Wire.begin(pinSda, pinScl, 100000U);
+
+    if (!units.add(cardkb2, Wire) ||
+        !units.begin()) {
+        Serial.println(
+            "CardKB2 not found; set it to I2C mode with Fn+Sym+1"
+        );
+
+        return false;
+    }
+
+    Serial.printf(
+        "CardKB2 firmware: %02x\n",
+        cardkb2.firmwareVersion()
+    );
+
+    return true;
+}
+}  // namespace
+#endif
 
 // -----------------------------------------------------------------------------
 // Configuration
 // -----------------------------------------------------------------------------
 
-#ifndef JOT_API_URL
-#define JOT_API_URL "http://txtin.gs/api/v1/messages"
+#ifndef JOT_MQTT_HOST
+#define JOT_MQTT_HOST ""
 #endif
 
-#ifndef JOT_API_TOKEN
-#define JOT_API_TOKEN ""
+#ifndef JOT_MQTT_PORT
+#define JOT_MQTT_PORT 1883
 #endif
 
-static const char* API_URL = JOT_API_URL;
-static const char* API_TOKEN = JOT_API_TOKEN;
+#ifndef JOT_MQTT_TOPIC
+#define JOT_MQTT_TOPIC "jot/messages"
+#endif
+
+#ifndef JOT_MQTT_USER
+#define JOT_MQTT_USER ""
+#endif
+
+#ifndef JOT_MQTT_PASSWORD
+#define JOT_MQTT_PASSWORD ""
+#endif
+
+static const char* MQTT_HOST     = JOT_MQTT_HOST;
+static const uint16_t MQTT_PORT  = JOT_MQTT_PORT;
+static const char* MQTT_TOPIC    = JOT_MQTT_TOPIC;
+static const char* MQTT_USER     = JOT_MQTT_USER;
+static const char* MQTT_PASSWORD = JOT_MQTT_PASSWORD;
 
 struct FriendlyNetwork {
     const char* ssid;
@@ -62,6 +127,9 @@ String deviceId;
 
 Preferences preferences;
 
+WiFiClient mqttNetworkClient;
+PubSubClient mqttClient(mqttNetworkClient);
+
 // Protects queue + queue file operations.
 SemaphoreHandle_t queueMutex;
 
@@ -84,6 +152,12 @@ struct NetworkStatus {
 NetworkStatus networkStatus;
 
 volatile bool uiDirty = true;
+
+#if defined(USE_CARDKB2_UNIT)
+#define APP_DISPLAY M5.Display
+#else
+#define APP_DISPLAY M5Cardputer.Display
+#endif
 
 // -----------------------------------------------------------------------------
 // Device identity
@@ -237,13 +311,13 @@ String jsonEscape(const String& value) {
     return out;
 }
 
-String buildPayload(
-    const std::vector<Message>& messages
+String buildMessagePayload(
+    const Message& message
 ) {
     String json;
 
     json.reserve(
-        256 + messages.size() * 128
+        128 + message.text.length()
     );
 
     json += "{";
@@ -252,29 +326,15 @@ String buildPayload(
     json += jsonEscape(deviceId);
     json += "\",";
 
-    json += "\"messages\":[";
+    json += "\"id\":\"";
+    json += jsonEscape(message.id);
+    json += "\",";
 
-    for (size_t i = 0;
-         i < messages.size();
-         i++) {
+    json += "\"text\":\"";
+    json += jsonEscape(message.text);
+    json += "\"";
 
-        if (i)
-            json += ",";
-
-        json += "{";
-
-        json += "\"id\":\"";
-        json += jsonEscape(messages[i].id);
-        json += "\",";
-
-        json += "\"text\":\"";
-        json += jsonEscape(messages[i].text);
-        json += "\"";
-
-        json += "}";
-    }
-
-    json += "]}";
+    json += "}";
 
     return json;
 }
@@ -339,7 +399,7 @@ void drawUI() {
     xSemaphoreGive(queueMutex);
 
     auto& display =
-        M5Cardputer.Display;
+        APP_DISPLAY;
 
     display.fillScreen(BLACK);
 
@@ -347,7 +407,7 @@ void drawUI() {
     display.setTextSize(1);
 
     display.setCursor(4, 4);
-    display.println("txtin.gs");
+    display.println("jot mqtt");
 
     // Network
 
@@ -480,6 +540,43 @@ void submitMessage() {
 // -----------------------------------------------------------------------------
 
 void handleKeyboard() {
+#if defined(USE_CARDKB2_UNIT)
+    if (!cardkb2Ready)
+        return;
+
+    if (!cardkb2.updated())
+        return;
+
+    while (cardkb2.available()) {
+        char c = cardkb2.getchar();
+        cardkb2.discard();
+
+        if (c == '\r' || c == '\n') {
+            submitMessage();
+            continue;
+        }
+
+        if (
+            (c == '\b' || c == 0x7f) &&
+            input.length() > 0
+        ) {
+            input.remove(
+                input.length() - 1
+            );
+
+            uiDirty = true;
+            continue;
+        }
+
+        if (
+            isprint((unsigned char)c) &&
+            input.length() < MAX_MESSAGE_LENGTH
+        ) {
+            input += c;
+            uiDirty = true;
+        }
+    }
+#else
     if (!M5Cardputer.Keyboard.isChange())
         return;
 
@@ -510,6 +607,7 @@ void handleKeyboard() {
     }
 
     uiDirty = true;
+#endif
 }
 
 // -----------------------------------------------------------------------------
@@ -631,17 +729,63 @@ bool connectFriendlyWiFi() {
 }
 
 // -----------------------------------------------------------------------------
-// HTTP upload
+// MQTT publish
 // -----------------------------------------------------------------------------
 
-bool postMessages(
+bool connectMqtt() {
+    if (mqttClient.connected())
+        return true;
+
+    if (strlen(MQTT_HOST) == 0) {
+        Serial.println(
+            "MQTT host not configured"
+        );
+
+        return false;
+    }
+
+    mqttClient.setServer(
+        MQTT_HOST,
+        MQTT_PORT
+    );
+
+    mqttClient.setBufferSize(1024);
+
+    Serial.printf(
+        "Connecting MQTT: %s:%u\n",
+        MQTT_HOST,
+        MQTT_PORT
+    );
+
+    bool connected = false;
+
+    if (strlen(MQTT_USER) > 0) {
+        connected = mqttClient.connect(
+            deviceId.c_str(),
+            MQTT_USER,
+            MQTT_PASSWORD
+        );
+    } else {
+        connected = mqttClient.connect(
+            deviceId.c_str()
+        );
+    }
+
+    if (!connected) {
+        Serial.printf(
+            "MQTT connect failed: %d\n",
+            mqttClient.state()
+        );
+    }
+
+    return connected;
+}
+
+bool publishMessages(
     const std::vector<Message>& messages
 ) {
     if (messages.empty())
         return true;
-
-    String payload =
-        buildPayload(messages);
 
     setNetworkStatus(
         true,
@@ -649,29 +793,7 @@ bool postMessages(
         WiFi.SSID().c_str()
     );
 
-    WiFiClient plainClient;
-    WiFiClientSecure secureClient;
-
-    // Development only.
-    //
-    // Replace with CA verification
-    // for production.
-    secureClient.setInsecure();
-
-    bool useTls =
-        String(API_URL).startsWith("https://");
-
-    WiFiClient& client =
-        useTls
-            ? static_cast<WiFiClient&>(secureClient)
-            : plainClient;
-
-    HTTPClient http;
-
-    if (!http.begin(
-        client,
-        API_URL
-    )) {
+    if (!connectMqtt()) {
         setNetworkStatus(
             true,
             false,
@@ -681,35 +803,31 @@ bool postMessages(
         return false;
     }
 
-    http.setTimeout(5000);
+    bool success = true;
 
-    http.addHeader(
-        "Content-Type",
-        "application/json"
-    );
+    for (const Message& message : messages) {
+        String payload =
+            buildMessagePayload(message);
 
-    if (strlen(API_TOKEN) > 0) {
-        String authorization =
-            "Bearer " +
-            String(API_TOKEN);
+        bool published =
+            mqttClient.publish(
+                MQTT_TOPIC,
+                payload.c_str()
+            );
 
-        http.addHeader(
-            "Authorization",
-            authorization
+        mqttClient.loop();
+
+        Serial.printf(
+            "MQTT publish %s: %s\n",
+            message.id.c_str(),
+            published ? "ok" : "failed"
         );
+
+        if (!published) {
+            success = false;
+            break;
+        }
     }
-
-    int status =
-        http.POST(
-            payload
-        );
-
-    Serial.printf(
-        "POST status: %d\n",
-        status
-    );
-
-    http.end();
 
     setNetworkStatus(
         WiFi.status() ==
@@ -721,10 +839,7 @@ bool postMessages(
             : ""
     );
 
-    return (
-        status >= 200 &&
-        status < 300
-    );
+    return success;
 }
 
 // -----------------------------------------------------------------------------
@@ -782,14 +897,14 @@ void networkTask(void* parameter) {
         // this request blocks.
 
         bool success =
-            postMessages(pending);
+            publishMessages(pending);
 
         if (success) {
 
             // Remove ONLY what was in the
             // snapshot we successfully sent.
             //
-            // Messages typed while HTTP was
+            // Messages typed while MQTT was
             // running stay in the queue.
 
             removeDeliveredMessages(
@@ -800,7 +915,7 @@ void networkTask(void* parameter) {
             //
             // Immediately loop around because
             // more messages may have arrived
-            // while the HTTP request was active.
+            // while MQTT publishing was active.
 
             continue;
         }
@@ -831,6 +946,16 @@ void networkTask(void* parameter) {
 void setup() {
     Serial.begin(115200);
 
+#if defined(USE_CARDKB2_UNIT)
+    auto cfg = M5.config();
+
+    M5.begin(cfg);
+
+    M5.Display.setRotation(1);
+
+    cardkb2Ready =
+        setupCardKB2();
+#else
     auto cfg = M5.config();
 
     M5Cardputer.begin(
@@ -839,6 +964,7 @@ void setup() {
     );
 
     M5Cardputer.Display.setRotation(1);
+#endif
 
     LittleFS.begin(true);
 
@@ -906,7 +1032,12 @@ void loop() {
     // This path stays very fast regardless of
     // WiFi or server behavior.
 
+#if defined(USE_CARDKB2_UNIT)
+    M5.update();
+    units.update();
+#else
     M5Cardputer.update();
+#endif
 
     handleKeyboard();
 
