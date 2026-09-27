@@ -8,11 +8,10 @@
 #endif
 
 #include <WiFi.h>
-#include <HTTPClient.h>
 #include <WiFiClient.h>
-#include <WiFiClientSecure.h>
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <PubSubClient.h>
 
 #include <cctype>
 #include <cstring>
@@ -65,16 +64,31 @@ bool setupCardKB2() {
 // Configuration
 // -----------------------------------------------------------------------------
 
-#ifndef JOT_API_URL
-#define JOT_API_URL "http://txtin.gs/api/v1/messages"
+#ifndef JOT_MQTT_HOST
+#define JOT_MQTT_HOST ""
 #endif
 
-#ifndef JOT_API_TOKEN
-#define JOT_API_TOKEN ""
+#ifndef JOT_MQTT_PORT
+#define JOT_MQTT_PORT 1883
 #endif
 
-static const char* API_URL = JOT_API_URL;
-static const char* API_TOKEN = JOT_API_TOKEN;
+#ifndef JOT_MQTT_TOPIC
+#define JOT_MQTT_TOPIC "jot/messages"
+#endif
+
+#ifndef JOT_MQTT_USER
+#define JOT_MQTT_USER ""
+#endif
+
+#ifndef JOT_MQTT_PASSWORD
+#define JOT_MQTT_PASSWORD ""
+#endif
+
+static const char* MQTT_HOST     = JOT_MQTT_HOST;
+static const uint16_t MQTT_PORT  = JOT_MQTT_PORT;
+static const char* MQTT_TOPIC    = JOT_MQTT_TOPIC;
+static const char* MQTT_USER     = JOT_MQTT_USER;
+static const char* MQTT_PASSWORD = JOT_MQTT_PASSWORD;
 
 struct FriendlyNetwork {
     const char* ssid;
@@ -112,6 +126,9 @@ String input;
 String deviceId;
 
 Preferences preferences;
+
+WiFiClient mqttNetworkClient;
+PubSubClient mqttClient(mqttNetworkClient);
 
 // Protects queue + queue file operations.
 SemaphoreHandle_t queueMutex;
@@ -294,13 +311,13 @@ String jsonEscape(const String& value) {
     return out;
 }
 
-String buildPayload(
-    const std::vector<Message>& messages
+String buildMessagePayload(
+    const Message& message
 ) {
     String json;
 
     json.reserve(
-        256 + messages.size() * 128
+        128 + message.text.length()
     );
 
     json += "{";
@@ -309,29 +326,15 @@ String buildPayload(
     json += jsonEscape(deviceId);
     json += "\",";
 
-    json += "\"messages\":[";
+    json += "\"id\":\"";
+    json += jsonEscape(message.id);
+    json += "\",";
 
-    for (size_t i = 0;
-         i < messages.size();
-         i++) {
+    json += "\"text\":\"";
+    json += jsonEscape(message.text);
+    json += "\"";
 
-        if (i)
-            json += ",";
-
-        json += "{";
-
-        json += "\"id\":\"";
-        json += jsonEscape(messages[i].id);
-        json += "\",";
-
-        json += "\"text\":\"";
-        json += jsonEscape(messages[i].text);
-        json += "\"";
-
-        json += "}";
-    }
-
-    json += "]}";
+    json += "}";
 
     return json;
 }
@@ -404,7 +407,7 @@ void drawUI() {
     display.setTextSize(1);
 
     display.setCursor(4, 4);
-    display.println("txtin.gs");
+    display.println("jot mqtt");
 
     // Network
 
@@ -726,17 +729,63 @@ bool connectFriendlyWiFi() {
 }
 
 // -----------------------------------------------------------------------------
-// HTTP upload
+// MQTT publish
 // -----------------------------------------------------------------------------
 
-bool postMessages(
+bool connectMqtt() {
+    if (mqttClient.connected())
+        return true;
+
+    if (strlen(MQTT_HOST) == 0) {
+        Serial.println(
+            "MQTT host not configured"
+        );
+
+        return false;
+    }
+
+    mqttClient.setServer(
+        MQTT_HOST,
+        MQTT_PORT
+    );
+
+    mqttClient.setBufferSize(1024);
+
+    Serial.printf(
+        "Connecting MQTT: %s:%u\n",
+        MQTT_HOST,
+        MQTT_PORT
+    );
+
+    bool connected = false;
+
+    if (strlen(MQTT_USER) > 0) {
+        connected = mqttClient.connect(
+            deviceId.c_str(),
+            MQTT_USER,
+            MQTT_PASSWORD
+        );
+    } else {
+        connected = mqttClient.connect(
+            deviceId.c_str()
+        );
+    }
+
+    if (!connected) {
+        Serial.printf(
+            "MQTT connect failed: %d\n",
+            mqttClient.state()
+        );
+    }
+
+    return connected;
+}
+
+bool publishMessages(
     const std::vector<Message>& messages
 ) {
     if (messages.empty())
         return true;
-
-    String payload =
-        buildPayload(messages);
 
     setNetworkStatus(
         true,
@@ -744,29 +793,7 @@ bool postMessages(
         WiFi.SSID().c_str()
     );
 
-    WiFiClient plainClient;
-    WiFiClientSecure secureClient;
-
-    // Development only.
-    //
-    // Replace with CA verification
-    // for production.
-    secureClient.setInsecure();
-
-    bool useTls =
-        String(API_URL).startsWith("https://");
-
-    WiFiClient& client =
-        useTls
-            ? static_cast<WiFiClient&>(secureClient)
-            : plainClient;
-
-    HTTPClient http;
-
-    if (!http.begin(
-        client,
-        API_URL
-    )) {
+    if (!connectMqtt()) {
         setNetworkStatus(
             true,
             false,
@@ -776,35 +803,31 @@ bool postMessages(
         return false;
     }
 
-    http.setTimeout(5000);
+    bool success = true;
 
-    http.addHeader(
-        "Content-Type",
-        "application/json"
-    );
+    for (const Message& message : messages) {
+        String payload =
+            buildMessagePayload(message);
 
-    if (strlen(API_TOKEN) > 0) {
-        String authorization =
-            "Bearer " +
-            String(API_TOKEN);
+        bool published =
+            mqttClient.publish(
+                MQTT_TOPIC,
+                payload.c_str()
+            );
 
-        http.addHeader(
-            "Authorization",
-            authorization
+        mqttClient.loop();
+
+        Serial.printf(
+            "MQTT publish %s: %s\n",
+            message.id.c_str(),
+            published ? "ok" : "failed"
         );
+
+        if (!published) {
+            success = false;
+            break;
+        }
     }
-
-    int status =
-        http.POST(
-            payload
-        );
-
-    Serial.printf(
-        "POST status: %d\n",
-        status
-    );
-
-    http.end();
 
     setNetworkStatus(
         WiFi.status() ==
@@ -816,10 +839,7 @@ bool postMessages(
             : ""
     );
 
-    return (
-        status >= 200 &&
-        status < 300
-    );
+    return success;
 }
 
 // -----------------------------------------------------------------------------
@@ -877,14 +897,14 @@ void networkTask(void* parameter) {
         // this request blocks.
 
         bool success =
-            postMessages(pending);
+            publishMessages(pending);
 
         if (success) {
 
             // Remove ONLY what was in the
             // snapshot we successfully sent.
             //
-            // Messages typed while HTTP was
+            // Messages typed while MQTT was
             // running stay in the queue.
 
             removeDeliveredMessages(
@@ -895,7 +915,7 @@ void networkTask(void* parameter) {
             //
             // Immediately loop around because
             // more messages may have arrived
-            // while the HTTP request was active.
+            // while MQTT publishing was active.
 
             continue;
         }
