@@ -1,3 +1,12 @@
+_
 .pio
 *.pyc
 .idea
+*.sw*
+include/jot_config.h
+firmware/cardkb2/build/
+firmware/cardkb2/managed_components/
+firmware/cardkb2/sdkconfig
+firmware/cardkb2/sdkconfig.old
+firmware/cardkb2/sdkconfig.cardkb2*
+firmware/cardkb2/firmware.map
