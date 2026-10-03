@@ -10,3 +10,5 @@ firmware/cardkb2/sdkconfig
 firmware/cardkb2/sdkconfig.old
 firmware/cardkb2/sdkconfig.cardkb2*
 firmware/cardkb2/firmware.map
+firmware/cardkb2/main/managed_components/
+firmware/cardkb2/**/*.map
