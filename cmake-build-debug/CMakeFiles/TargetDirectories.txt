@@ -1,0 +1,3 @@
+/home/trevor/projects/jot/cmake-build-debug/CMakeFiles/jot.dir
+/home/trevor/projects/jot/cmake-build-debug/CMakeFiles/edit_cache.dir
+/home/trevor/projects/jot/cmake-build-debug/CMakeFiles/rebuild_cache.dir
