@@ -37,10 +37,18 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.20.4
+  lvgl/lvgl:
+    component_hash: 096c69af22eaf8a2b721e3913da91918c5e6bf1a762a113ec01f401aa61337a0
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 9.2.2
 direct_dependencies:
 - espressif/button
 - idf
 - joltwallet/littlefs
-manifest_hash: 4364135c215fd2d71f1b3fea896505effeb7c71cf0218523a733a2fc823abeda
+- lvgl/lvgl
+manifest_hash: ef5e504a90610b70a07645829a96f132d7c3e858087b730f8ab672f3faf27801
 target: esp32c61
 version: 2.0.0

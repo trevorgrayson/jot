@@ -16,7 +16,7 @@ This repository contains the Jot product firmware, a shared note/queue engine, h
 | `firmware/cardkb2/` | Standalone CardKB2 ESP32-C61 firmware. This is an ESP-IDF project based on M5Stack OEM CardKB2 firmware, extended with Jot mode, OLED output, BLE mode handling, and factory transport preservation. |
 | `firmware/cardkb2/main/app/` | CardKB2 application state machine: mode selection, shortcut handling, RGB state, key repeat, and factory/Jot/BLE transitions. |
 | `firmware/cardkb2/main/bsp/` | CardKB2 board support adapted from OEM code: keyboard scanner, RGB LED, I²C peripheral mode, UART mode, ESP-NOW mode, and BLE HID. |
-| `firmware/cardkb2/main/jot/` | CardKB2 Jot adapter: LittleFS mount, Wi-Fi worker, OLED SSD1306 driver on G26/G25, Jot key routing, and serial diagnostics. |
+| `firmware/cardkb2/main/jot/` | CardKB2 Jot adapter: LittleFS mount, Wi-Fi worker, LVGL OLED UI and SSD1306 driver on G26/G25, Jot key routing, and serial diagnostics. |
 | `firmware/cardkb2/partitions.csv` | ESP32-C61 4MB partition table. It keeps NVS/PHY regions and adds a 1MB `jot` LittleFS partition at `0x300000`. |
 | `scripts/cardkb2_project.py` | PlatformIO pre-script that makes the top-level `cardkb2` environment build the nested ESP-IDF project. |
 | `test/core_test.cpp` and `test/run-native.sh` | Host-side tests for `JotCore`, including capacity, torn writes, migration, failed saves, acknowledgements, JSON escaping, and hold timing. |
@@ -95,7 +95,7 @@ Connect a **128×64, 5V SSD1306 I²C module**:
 | G26 | SDA |
 | G25 | SCL |
 
-Default OLED address: `0x3C`; override with `JOT_OLED_ADDRESS` for `0x3D`. The 400kHz bus drives a status row, feedback row, and six scrolling editor rows.
+Default OLED address: `0x3C`; override with `JOT_OLED_ADDRESS` for `0x3D`. LVGL 9.2.2 renders a status row, feedback row, and six scrolling editor rows using an 8-pixel monospace font. A 1-bit framebuffer is converted to SSD1306 pages and sent over the 400kHz bus. `firmware/cardkb2/main/jot/jot_display.cpp` owns the LVGL labels and display transport; the app task updates them every 100ms and only changed text triggers rendering.
 
 Check SDA/SCL pull-ups for compatibility with 3.3V GPIO. A 5V VCC rating alone does not establish signal compatibility. Verify Grove voltage with the OLED operating under the intended power source, including USB if used. An absent or unresponsive OLED disables rendering without stopping the keyboard; a mode change/restart probes it again.
 

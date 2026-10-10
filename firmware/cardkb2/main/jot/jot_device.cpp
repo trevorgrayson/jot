@@ -1,8 +1,7 @@
 #include "jot_device.h"
-#include "font8x8_basic.h"
+#include "jot_display.h"
 #include "JotCore.h"
 #include "JotConfig.h"
-#include "driver/i2c_master.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_littlefs.h"
@@ -76,8 +75,6 @@ int currentMode = 0;
 char notice[48] = {};
 uint32_t noticeUntil = 0, lastDraw = 0;
 jot::Hold pairing;
-i2c_master_bus_handle_t bus = nullptr;
-i2c_master_dev_handle_t oled = nullptr;
 esp_netif_t* netif = nullptr;
 esp_event_handler_instance_t wifiHandler, ipHandler;
 bool wifiOwned = false;
@@ -93,95 +90,30 @@ bool blankPartition() {
     }
     return true;
 }
-void oledStop() {
-    if (oled || bus) ESP_LOGI("jot", "OLED stop");
-    if (oled || bus) printf("JOT: OLED stop\r\n");
-    if (oled) { i2c_master_bus_rm_device(oled); oled = nullptr; }
-    if (bus) { i2c_del_master_bus(bus); bus = nullptr; }
-}
-void oledStart() {
-    ESP_LOGI("jot", "OLED start: SDA=26 SCL=25 address=0x%02x", JOT_OLED_ADDRESS);
-    printf("JOT: OLED start SDA=26 SCL=25 address=0x%02x\r\n", JOT_OLED_ADDRESS);
-    i2c_master_bus_config_t config = {};
-    config.i2c_port = I2C_NUM_0; config.sda_io_num = GPIO_NUM_26; config.scl_io_num = GPIO_NUM_25;
-    config.clk_source = I2C_CLK_SRC_DEFAULT; config.glitch_ignore_cnt = 7;
-    config.flags.enable_internal_pullup = true;
-    esp_err_t err = i2c_new_master_bus(&config, &bus);
-    if (err != ESP_OK) {
-        ESP_LOGE("jot", "OLED I2C bus init failed: %s", esp_err_to_name(err));
-        printf("JOT: OLED I2C bus init failed: %s\r\n", esp_err_to_name(err));
-        bus = nullptr;
-        return;
-    }
-    err = i2c_master_probe(bus, JOT_OLED_ADDRESS, 50);
-    if (err != ESP_OK) {
-        ESP_LOGW("jot", "OLED probe failed at 0x%02x: %s", JOT_OLED_ADDRESS, esp_err_to_name(err));
-        printf("JOT: OLED probe failed at 0x%02x: %s\r\n", JOT_OLED_ADDRESS, esp_err_to_name(err));
-        oledStop();
-        return;
-    }
-    i2c_device_config_t dev = {};
-    dev.dev_addr_length = I2C_ADDR_BIT_LEN_7; dev.device_address = JOT_OLED_ADDRESS;
-    dev.scl_speed_hz = 400000;
-    err = i2c_master_bus_add_device(bus, &dev, &oled);
-    if (err != ESP_OK) {
-        ESP_LOGE("jot", "OLED add device failed: %s", esp_err_to_name(err));
-        printf("JOT: OLED add device failed: %s\r\n", esp_err_to_name(err));
-        oledStop();
-        return;
-    }
-    const uint8_t init[] = {0x00, 0xae, 0xd5, 0x80, 0xa8, 0x3f, 0xd3, 0x00, 0x40,
-        0x8d, 0x14, 0x20, 0x00, 0xa1, 0xc8, 0xda, 0x12, 0x81, 0x7f,
-        0xd9, 0xf1, 0xdb, 0x40, 0xa4, 0xa6, 0xaf};
-    err = i2c_master_transmit(oled, init, sizeof(init), 50);
-    if (err != ESP_OK) {
-        ESP_LOGE("jot", "OLED init transmit failed: %s", esp_err_to_name(err));
-        printf("JOT: OLED init transmit failed: %s\r\n", esp_err_to_name(err));
-        oledStop();
-        return;
-    }
-    ESP_LOGI("jot", "OLED ready");
-    printf("JOT: OLED ready\r\n");
-}
-void text(uint8_t* frame, unsigned row, const std::string& line) {
-    for (unsigned column = 0; column < std::min(size_t(16), line.size()); ++column) {
-        unsigned char c = line[column]; if (c > 127) c = '?';
-        for (unsigned x = 0; x < 8; ++x) {
-            uint8_t bits = 0;
-            for (unsigned y = 0; y < 8; ++y) if (font8x8_basic[c][y] & (1u << x)) bits |= 1u << y;
-            frame[1 + row * 128 + column * 8 + x] = bits;
-        }
-    }
-}
 void draw() {
-    if (!oled) return;
-    uint8_t frame[1025] = {}; frame[0] = 0x40;
+    std::array<std::string, 8> rows;
     xSemaphoreTake(mutex, portMAX_DELAY);
     const auto draft = core.draft(); const auto count = core.pending().size(); const bool ready = core.ready();
     xSemaphoreGive(mutex);
     char status[32];
     if (currentMode == 6) {
         snprintf(status, sizeof(status), "JOT %s Q:%u", sending ? "SEND" : online ? "WIFI" : "OFF", unsigned(count));
-        text(frame, 0, status);
+        rows[0] = status;
         std::string editor = draft + '_';
-        const size_t rows = (editor.size() + 15) / 16;
-        const size_t first = rows > 6 ? (rows - 6) * 16 : 0;
+        const size_t editorRows = (editor.size() + 15) / 16;
+        const size_t first = editorRows > 6 ? (editorRows - 6) * 16 : 0;
         for (unsigned r = 0; r < 6 && first + r * 16 < editor.size(); ++r)
-            text(frame, r + 2, editor.substr(first + r * 16, 16));
+            rows[r + 2] = editor.substr(first + r * 16, 16);
     } else {
-        text(frame, 0, "BLE keyboard");
-        text(frame, 2, bleState == 2 ? "Connected" : "Not connected");
-        text(frame, 3, bleState == 1 ? "Advertising" : "");
-        text(frame, 5, "Fn+Sym+5: Jot");
-        text(frame, 6, "Fn+Sym+0 hold:"); text(frame, 7, "Clear pairing");
+        rows[0] = "BLE keyboard";
+        rows[2] = bleState == 2 ? "Connected" : "Not connected";
+        rows[3] = bleState == 1 ? "Advertising" : "";
+        rows[5] = "Fn+Sym+5: Jot";
+        rows[6] = "Fn+Sym+0 hold:"; rows[7] = "Clear pairing";
     }
-    if (!ready && currentMode == 6) text(frame, 1, "Storage error");
-    else if (notice[0]) text(frame, 1, notice);
-    const uint8_t window[] = {0x00, 0x21, 0, 127, 0x22, 0, 7};
-    if (i2c_master_transmit(oled, window, sizeof(window), 50) != ESP_OK ||
-        i2c_master_transmit(oled, frame, sizeof(frame), 100) != ESP_OK) {
-        ESP_LOGW("jot", "OLED removed or unresponsive; keyboard continues"); oledStop();
-    }
+    if (!ready && currentMode == 6) rows[1] = "Storage error";
+    else if (notice[0]) rows[1] = notice;
+    jot::display::update(rows);
 }
 void wifiEvent(void*, esp_event_base_t base, int32_t id, void*) {
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) online = true;
@@ -320,13 +252,13 @@ extern "C" void jot_device_leave_mode() {
     printf("JOT: leave mode current=%d active=%s\r\n", currentMode, active ? "true" : "false");
     active = false;
     xSemaphoreTake(radio, portMAX_DELAY); wifiStop(); xSemaphoreGive(radio);
-    oledStop(); currentMode = 0;
+    jot::display::stop(); currentMode = 0;
 }
 extern "C" void jot_device_enter_mode(int mode) {
     ESP_LOGI("jot", "Enter mode: %d", mode);
     printf("JOT: enter mode %d\r\n", mode);
     currentMode = mode;
-    if (mode == 6 || mode == 4) oledStart();
+    if (mode == 6 || mode == 4) jot::display::start();
     active = mode == 6;
     ESP_LOGI("jot", "Jot active: %s", active ? "true" : "false");
     printf("JOT: active %s\r\n", active ? "true" : "false");

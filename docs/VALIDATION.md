@@ -7,10 +7,12 @@
 | `bash test/run-native.sh` | Passed with AddressSanitizer and UndefinedBehaviorSanitizer |
 | `pio run -e m5stack-cardputer` | Compiled |
 | `pio run -e cardkb2-host` | Compiled for ESP32-S3; renamed external-host target |
-| `pio run -e cardkb2` | Compiled with ESP-IDF 5.5.5; C61 upload flags and Jot partition table verified |
+| `pio run -e cardkb2` | Compiled with ESP-IDF 5.5.5, including the LVGL 9.2.2 OLED renderer (2026-10-09); C61 upload flags and Jot partition table verified |
 | ESP-IDF v5.5.3: `idf.py -C firmware/cardkb2 build` | Compiled for ESP32-C61 |
 
 Core tests interrupt a new snapshot write at every byte boundary and verify the previous note survives restart. They cover failed acknowledgement writes, preserving notes submitted during an upload, migration without resurrecting legacy notes, invalid storage, capacity, JSON escaping, and one action per hold across timer wraparound.
+
+The LVGL display adapter also passed a temporary native harness using the real LVGL 9.2.2 renderer and simulated I²C. It checked blank frames, cursor visibility on the first/last rows, the sixteenth character, no refresh for unchanged text, absent OLEDs, transmit failures, and 30 start/stop cycles with a 16KB LVGL pool. The harness and logs are in `/tmp/jot-lvgl-check` for this workspace session. These checks do not validate physical OLED output, electrical behavior, or device stack/heap margins.
 
 ## Physical acceptance — pending
 

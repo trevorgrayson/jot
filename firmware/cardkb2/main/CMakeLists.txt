@@ -31,6 +31,7 @@ idf_component_register(
         esp_timer
         esp_event
         json
+        lvgl
         littlefs
     PRIV_REQUIRES 
         nvs_flash
